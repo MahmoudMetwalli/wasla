@@ -10,14 +10,14 @@ A Python package for building event-driven consumers with RabbitMQ, featuring:
 
 ## Installation
 ```bash
-pip install events-consumer
+pip install wasla
 ```
 
 ## Quick Start
 
 ### 1. Create a Consumer Service
 ```python
-from events_consumer import Builder, Router
+from wasla import Builder, Router
 from pydantic import BaseModel
 
 # Define your event schema
