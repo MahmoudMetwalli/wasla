@@ -1,0 +1,24 @@
+[build-system]
+requires = ["hatchling >= 1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "wasla"
+version = "0.0.1"
+authors = [
+  { name="Mahmoud Metwalli", email="mammkbih@gmail.com" },
+]
+description = "Wasla (meaning 'connection' in Arabic) is a Python package that bridges your services through fast, fault-tolerant event-driven architecture. Built on aio-pika"
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "License :: OSI Approved :: Apache Software License",
+]
+license = "Apache-2.0"
+license-files = ["LICENSE*"]
+
+[project.urls]
+Homepage = "https://github.com/MahmoudMetwalli/wasla"
+Issues = "https://github.com/MahmoudMetwalli/wasla/issues"
