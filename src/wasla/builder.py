@@ -1,19 +1,32 @@
 """Builder Module"""
+
 import asyncio
 import logging
 from logging import Logger
 import colorlog
-from aio_pika.abc import AbstractIncomingMessage
+from aio_pika.abc import AbstractIncomingMessage, Arguments, TimeoutType
 from aio_pika import Channel, Exchange, ExchangeType, Message, DeliveryMode, Queue
 from wasla.request import Request
 from wasla.middleware_manager import MiddlewareManager
 from wasla.middleware_interface import MiddlewareInterface
 from wasla.routing_middleware import RoutingMiddleware
-from wasla.logger_middleware import LoggerMiddlware
 from wasla.router import Router
 
+
 class Builder:
-    def __init__(self,  routing_key: str, queue_name: str | None = None, concurrency_limit: int = 10):
+    def __init__(
+        self,
+        routing_key: str,
+        queue_name: str | None = None,
+        concurrency_limit: int = 10,
+        *,
+        durable: bool = False,
+        exclusive: bool = False,
+        passive: bool = False,
+        auto_delete: bool = False,
+        arguments: Arguments = None,
+        timeout: TimeoutType = None,
+    ):
         self.__queue_name = queue_name
         self.__routing_key = routing_key
         self.__concurrency_limit = concurrency_limit
@@ -27,11 +40,19 @@ class Builder:
         self._logger = None
         self.__middleware_manager = MiddlewareManager()
         self.__routing_middleware = RoutingMiddleware(self.__routes)
+        self.__tasks: set[asyncio.Task] = set()
+        self.__durable = durable
+        self.__exclusive = exclusive
+        self.__passive = passive
+        self.__auto_delete = auto_delete
+        self.__arguments = arguments
+        self.__timeout = timeout
 
     @property
     def queue(self) -> Queue:
         """Get the queue name"""
         return self._queue
+
     @queue.setter
     def queue(self, queue: Queue):
         """Set the queue with validation"""
@@ -91,26 +112,38 @@ class Builder:
             raise ValueError("Exchange is required")
         if self._exchange.channel != self._amqp_channel:
             raise ValueError("Exchange must belong to the configured AMQP channel")
-        
+
         # Declaring queue
         if isinstance(self._queue, Queue):
             if self._queue.channel != self._amqp_channel:
                 raise ValueError("Queue must belong to the configured AMQP channel")
-            await self._queue.bind(self._exchange, routing_key=f"#.{self.__routing_key}.#")
+            await self._queue.bind(
+                self._exchange, routing_key=f"#.{self.__routing_key}.#"
+            )
         else:
             if self._amqp_channel is None:
                 raise ValueError("AMQP channel is required or manually set a queue")
             # If queue is not set, create one
             if self.__queue_name is None:
-                raise ValueError("Manually set a queue, or provide a queue name to automatically create one")
+                raise ValueError(
+                    "Manually set a queue, or provide a queue name to automatically create one"
+                )
             # Create a new queue with the given name
             self.__queue = await self._amqp_channel.declare_queue(
-                self.__queue_name, durable=True,
+                self.__queue_name,
+                durable=self.__durable,
+                exclusive=self.__exclusive,
+                passive=self.__passive,
+                auto_delete=self.__auto_delete,
+                arguments=self.__arguments,
+                timeout=self.__timeout,
             )
             await self.__queue.bind(self._exchange, routing_key=f"{self.__routing_key}")
 
     async def __set_semaphore(self):
-        self.__semaphore = asyncio.Semaphore(self.__concurrency_limit)  # Limit concurrent tasks
+        self.__semaphore = asyncio.Semaphore(
+            self.__concurrency_limit
+        )  # Limit concurrent tasks
 
     async def __set_routes(self):
         for router in self.__routers:
@@ -132,43 +165,76 @@ class Builder:
         if len(duplicates) != 0:
             raise Exception("Duplicated Routes Are not Allowed")
         if len(invalid_routes) != 0:
-            raise Exception(f"Routing Keys Should Include The Service Routing Key: {self.__routing_key}")
+            raise Exception(
+                f"Routing Keys Should Include The Service Routing Key: {self.__routing_key}"
+            )
 
     async def __consume(self):
         """Consume messages with async processing and manual acknowledgment"""
-        self._logger.info(f"Listening to queue: {self.__queue_name} with routing key: {self.__routing_key}")
-        async with self.__queue.iterator() as iterator:
-            message: AbstractIncomingMessage
-            async for message in iterator:
-            # Don't use message.process() to handle ack manually
-                try:
-                    async with self.__semaphore:
-                        # Create and track the task
-                        task = asyncio.create_task(self.__message_handler(message))
-                        # Add done callback for acknowledgment
-                        task.add_done_callback(
-                            lambda t: asyncio.create_task(self.__handle_completion(message, t))
+        self._logger.info(
+            f"Listening to queue: {self.__queue_name} with routing key: {self.__routing_key}"
+        )
+        try:
+            async with self.__queue.iterator() as iterator:
+                message: AbstractIncomingMessage
+                async for message in iterator:
+                    try:
+                        async with self.__semaphore:
+                            task = asyncio.create_task(self.__message_handler(message))
+                            self.__tasks.add(task)
+                            task.add_done_callback(self.__tasks.discard)
+                            task.add_done_callback(
+                                lambda t: asyncio.create_task(
+                                    self.__handle_completion(message, t)
+                                )
+                            )
+                    except Exception as e:
+                        self._logger.error(
+                            f"Failed to create task for message:{message.message_id}: {e}"
                         )
-                except Exception as e:
-                    self._logger.error(f"Failed to create task for message:{message.message_id}: {e}")
-                    await message.reject(requeue=True)
+                        await message.reject(requeue=True)
+        except asyncio.CancelledError:
+            self._logger.info("Gracefully shutting down wasla...")
+            await self.__cancel_pending_tasks()
+        except Exception as e:
+            self._logger.error(f"Consumer error: {str(e)}")
+            raise
 
-    async def __handle_completion(self, message: AbstractIncomingMessage, task: asyncio.Task):
+    async def __cancel_pending_tasks(self):
+        """Cancel all pending tasks"""
+        if not self.__tasks:
+            return
+
+        self._logger.info(f"Cancelling {len(self.__tasks)} pending tasks...")
+        for task in self.__tasks:
+            if not task.done():
+                task.cancel()
+
+        await asyncio.gather(*self.__tasks, return_exceptions=True)
+        self.__tasks.clear()
+
+    async def __handle_completion(
+        self, message: AbstractIncomingMessage, task: asyncio.Task
+    ):
         """Handle task completion with retry counting"""
         try:
             await task
             await message.ack()
         except Exception as e:
-            retry_count = int(message.headers.get('x-retry-count', 0))
-            self._logger.error(f"Message {message.message_id} failed, will undergo retry, {e}", exc_info=True)
+            retry_count = int(message.headers.get("x-retry-count", 0))
+            self._logger.error(
+                f"Message {message.message_id} failed, will undergo retry, {e}",
+                exc_info=True,
+            )
             # Check if retry count is less than max retries
             if retry_count < 3:  # Max retries
                 # Republish to end of queue with increased retry count
                 message_retry = Message(
-                message.body,
-                delivery_mode=DeliveryMode.PERSISTENT,
-                type=str,
-                headers={'x-retry-count': retry_count + 1})
+                    message.body,
+                    delivery_mode=DeliveryMode.PERSISTENT,
+                    type=str,
+                    headers={"x-retry-count": retry_count + 1},
+                )
                 await self._exchange.publish(
                     message_retry,
                     routing_key=message.routing_key,
@@ -176,46 +242,38 @@ class Builder:
                 await message.ack()  # Ack original message
             else:
                 # Move to dead letter queue or log permanent failure
-                self._logger.error(f"Message {message.message_id} failed after {retry_count} retries")
+                self._logger.error(
+                    f"Message {message.message_id} failed after {retry_count} retries"
+                )
                 await message.reject(requeue=False)
 
     async def __get_logger(self, service_name: str) -> Logger:
-    # Create a custom color formatter for console output
+        # Create a custom color formatter for console output
         color_formatter = colorlog.ColoredFormatter(
-                fmt='%(purple)s%(asctime)s%(reset)s - %(blue)s%(name)s%(reset)s - %(log_color)s%(levelname)s%(reset)s - %(message_log_color)s%(message)s%(reset)s',
-                datefmt='%Y-%m-%d %H:%M:%S',
-                log_colors={
-                    'DEBUG':    'cyan',
-                    'INFO':     'green',
-                    'WARNING': 'yellow',
-                    'ERROR':    'red',
-                    'CRITICAL': 'red,bg_white',
-                },
-                secondary_log_colors={
-                    'message': {
-                        'DEBUG':    'white',
-                        'INFO':     'white', 
-                        'WARNING': 'yellow',
-                        'ERROR':    'red',
-                        'CRITICAL': 'red'
-                    }
-                },
-                style='%'
-            )
-
-        # Regular formatter for file output (without colors)
-        file_formatter = logging.Formatter(
-                fmt='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-                datefmt='%Y-%m-%d %H:%M:%S'
-            )
+            fmt="%(purple)s%(asctime)s%(reset)s - %(blue)s%(name)s%(reset)s - %(log_color)s%(levelname)s%(reset)s - %(message_log_color)s%(message)s%(reset)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+            log_colors={
+                "DEBUG": "cyan",
+                "INFO": "green",
+                "WARNING": "yellow",
+                "ERROR": "red",
+                "CRITICAL": "red,bg_white",
+            },
+            secondary_log_colors={
+                "message": {
+                    "DEBUG": "white",
+                    "INFO": "white",
+                    "WARNING": "yellow",
+                    "ERROR": "red",
+                    "CRITICAL": "red",
+                }
+            },
+            style="%",
+        )
 
         # Configure console handler with colors
         console_handler = logging.StreamHandler()
         console_handler.setFormatter(color_formatter)
-
-        # Configure file handler (without colors)
-        file_handler = logging.FileHandler(f"{service_name}.log")
-        file_handler.setFormatter(file_formatter)
 
         # Get logger instance
         logger = logging.getLogger(f"{service_name}")
@@ -224,7 +282,6 @@ class Builder:
         # Remove any existing handlers and add our custom handlers
         logger.handlers.clear()
         logger.addHandler(console_handler)
-        logger.addHandler(file_handler)
 
         # Prevent logger from propagating to root logger
         logger.propagate = False
@@ -237,6 +294,7 @@ class Builder:
     async def __message_handler(self, message: AbstractIncomingMessage):
         request = Request(message)
         await self.__middleware_manager.execute(request)
+        return True
 
     def add_middleware(self, middleware: MiddlewareInterface):
         """Add middleware to the builder"""
@@ -251,13 +309,42 @@ class Builder:
                 raise TypeError("Middleware must be an instance of MiddlewareInterface")
 
     async def run(self):
-        """Run the builder"""
-        if self._logger is None:
-            self._logger = await self.__get_logger(self.__queue_name)
-        await self.__set_queue()
-        await self.__set_semaphore()
-        await self.__set_routes()
-        self.__middleware_manager.add_middleware(LoggerMiddlware(self._logger))
-        await self.__activate_middleware()
-        self.__middleware_manager.add_middleware(self.__routing_middleware)
-        await self.__consume()
+        """Run the builder with graceful shutdown"""
+        try:
+            if self._logger is None:
+                self._logger = await self.__get_logger(self.__queue_name)
+
+            self._logger.info(f"Starting service with queue: {self.__queue_name}")
+            await self.__set_queue()
+            await self.__set_semaphore()
+            self._logger.info("Setting Routes")
+            await self.__set_routes()
+
+            self._logger.info("Configuring middleware chain")
+            await self.__activate_middleware()
+            self.__middleware_manager.add_middleware(self.__routing_middleware)
+
+            self._logger.info("Service started successfully")
+            await self.__consume()
+
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            self._logger.info("Received shutdown signal, cleaning up...")
+        except Exception as e:
+            self._logger.error(f"Service crashed: {str(e)}", exc_info=True)
+            raise
+        finally:
+            await self.__cleanup()
+
+    async def __cleanup(self):
+        """Cleanup resources before shutdown"""
+        try:
+            # Cancel pending tasks first
+            await self.__cancel_pending_tasks()
+
+            if self._amqp_channel and not self._amqp_channel.is_closed:
+                self._logger.info("Closing AMQP channel...")
+                await self._amqp_channel.close()
+
+            self._logger.info("Cleanup completed successfully")
+        except Exception as e:
+            self._logger.error(f"Error during cleanup: {str(e)}")

@@ -16,6 +16,8 @@ class MiddlewareManager:
     async def execute(self, request):
         async def run_middleware(middleware):
             if middleware:
-                await middleware.handle(request, lambda: run_middleware(middleware.next))
+                await middleware.handle(
+                    request, lambda: run_middleware(middleware.next)
+                )
 
         await run_middleware(self.__head)
