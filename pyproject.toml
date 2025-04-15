@@ -8,7 +8,11 @@ version = "0.0.1"
 authors = [
   { name="Mahmoud Metwalli", email="mammkbih@gmail.com" },
 ]
-description = "Wasla (meaning 'connection' in Arabic) is a Python package that bridges your services through fast, fault-tolerant event-driven architecture. Built on aio-pika"
+description = """Wasla was developed to facilitate the build of events based systems that uses RabbitMQ as the message broker,
+wasla is built on aio_pika to represent the core of RabbitMQ connection,
+while wasla provides a mini framework for routing and middlewares.
+With the right configuration and a well structured routing map, you can publish an event to many consumers
+with just one line of code."""
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
