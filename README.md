@@ -1,4 +1,4 @@
-# `wasla` Package Documentation
+# `wasla` Documentation
 
 ## Overview
 Wasla was developed to facilitate the build of events based systems that uses RabbitMQ as the message broker,
