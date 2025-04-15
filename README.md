@@ -119,7 +119,7 @@ builder.queue = queue  # Override auto-created queue
 - `Message validation failed` → Verify your Pydantic schemas match the event payloads
 - `Queue binding failed` → Check your routing key patterns (wildcards: `#`, `*`)
 
-For additional support, please [open an issue](https://github.com/your-repo/issues).
+For additional support, please [open an issue](https://github.com/MahmoudMetwalli/wasla/issues).
 
 ## License
 Licensed under the [Apache 2.0 License](LICENSE).  
