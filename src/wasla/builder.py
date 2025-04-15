@@ -1,4 +1,34 @@
-"""Builder Module"""
+"""
+Builder Module for AMQP Service Configuration and Management.
+
+This module provides a builder pattern implementation for setting up and running
+AMQP-based services. It handles:
+- Queue and exchange setup
+- Message consumption and processing
+- Middleware chain management
+- Logging configuration
+- Graceful shutdown
+- Error handling and retries
+- Concurrent message processing
+
+Example:
+    ```
+    builder = Builder(
+        routing_key="user.events",
+        queue_name="user_service",
+        concurrency_limit=10,
+        logging_level=logging.INFO,
+        durable=True
+    )
+    
+    # Add routes and middleware
+    builder.include_router(user_router)
+    builder.add_middleware(AuthMiddleware())
+    
+    # Start the service
+    await builder.run()
+    ```
+"""
 
 import asyncio
 import logging
@@ -10,15 +40,45 @@ from wasla.request import Request
 from wasla.middleware_manager import MiddlewareManager
 from wasla.middleware_interface import MiddlewareInterface
 from wasla.routing_middleware import RoutingMiddleware
+from wasla.logger_middleware import LoggerMiddleware
 from wasla.router import Router
 
 
 class Builder:
+    """
+    Builder class for configuring and running AMQP services.
+    
+    This class manages the lifecycle of an AMQP service, including:
+    - Queue and exchange configuration
+    - Message consumption and processing
+    - Middleware chain setup and execution
+    - Concurrent message handling
+    - Error handling and retries
+    - Graceful shutdown
+    
+    Attributes:
+        __queue_name: Name of the AMQP queue
+        __routing_key: Base routing key for message filtering
+        __concurrency_limit: Maximum concurrent messages to process
+        __routers: List of registered router instances
+        __routes: Flattened list of all routes from routers
+        __middlewares: List of middleware instances
+        _queue: AMQP queue instance
+        __semaphore: Concurrency control semaphore
+        _amqp_channel: AMQP channel instance
+        _exchange: AMQP exchange instance
+        _logger: Logger instance
+        __middleware_manager: Manager for middleware chain
+        __routing_middleware: Router for message handling
+        __tasks: Set of active tasks
+    """
+
     def __init__(
         self,
         routing_key: str,
         queue_name: str | None = None,
         concurrency_limit: int = 10,
+        logging_level: int | None = None,
         *,
         durable: bool = False,
         exclusive: bool = False,
@@ -27,6 +87,21 @@ class Builder:
         arguments: Arguments = None,
         timeout: TimeoutType = None,
     ):
+        """
+        Initialize a new Builder instance.
+        
+        Args:
+            routing_key: Base routing key for message filtering
+            queue_name: Optional queue name (auto-generated if None)
+            concurrency_limit: Maximum concurrent messages (default: 10)
+            logging_level: Optional logging level
+            durable: Queue survives broker restart
+            exclusive: Only one connection can use queue
+            passive: Check if queue exists without creating
+            auto_delete: Delete queue when last consumer unsubscribes
+            arguments: Optional queue arguments
+            timeout: Operation timeout
+        """
         self.__queue_name = queue_name
         self.__routing_key = routing_key
         self.__concurrency_limit = concurrency_limit
@@ -47,6 +122,7 @@ class Builder:
         self.__auto_delete = auto_delete
         self.__arguments = arguments
         self.__timeout = timeout
+        self.__logging_level = logging_level
 
     @property
     def queue(self) -> Queue:
@@ -153,21 +229,14 @@ class Builder:
                 self.__routes.append(route)
         seen_routes = set()
         duplicates = []
-        invalid_routes = []
         for route in self.__routes:
             routing_key = route.get("routing_key")
             if routing_key in seen_routes:
                 duplicates.append(routing_key)
             else:
                 seen_routes.add(routing_key)
-            if not (self.__routing_key in routing_key):
-                invalid_routes.append(route)
         if len(duplicates) != 0:
             raise Exception("Duplicated Routes Are not Allowed")
-        if len(invalid_routes) != 0:
-            raise Exception(
-                f"Routing Keys Should Include The Service Routing Key: {self.__routing_key}"
-            )
 
     async def __consume(self):
         """Consume messages with async processing and manual acknowledgment"""
@@ -247,7 +316,7 @@ class Builder:
                 )
                 await message.reject(requeue=False)
 
-    async def __get_logger(self, service_name: str) -> Logger:
+    async def __get_logger(self, service_name: str, logging_level: int) -> Logger:
         # Create a custom color formatter for console output
         color_formatter = colorlog.ColoredFormatter(
             fmt="%(purple)s%(asctime)s%(reset)s - %(blue)s%(name)s%(reset)s - %(log_color)s%(levelname)s%(reset)s - %(message_log_color)s%(message)s%(reset)s",
@@ -277,7 +346,7 @@ class Builder:
 
         # Get logger instance
         logger = logging.getLogger(f"{service_name}")
-        logger.setLevel(logging.INFO)
+        logger.setLevel(logging_level)
 
         # Remove any existing handlers and add our custom handlers
         logger.handlers.clear()
@@ -309,17 +378,44 @@ class Builder:
                 raise TypeError("Middleware must be an instance of MiddlewareInterface")
 
     async def run(self):
-        """Run the builder with graceful shutdown"""
+        """
+        Start the AMQP service with graceful shutdown support.
+        
+        This method:
+        1. Initializes logging
+        2. Sets up queue and exchange
+        3. Configures middleware chain
+        4. Starts message consumption
+        5. Handles graceful shutdown
+        
+        Raises:
+            ValueError: If configuration is invalid
+            Exception: If service setup or operation fails
+        """
         try:
-            if self._logger is None:
-                self._logger = await self.__get_logger(self.__queue_name)
+            if self._logger is None and self.__logging_level is not None:
+                if self.__logging_level not in [
+                    logging.DEBUG,
+                    logging.INFO,
+                    logging.WARNING,
+                    logging.ERROR,
+                    logging.CRITICAL,
+                    logging.NOTSET,
+                    logging.FATAL,
+                    logging.WARN,
+                ]:
+                    raise ValueError("Invalid logging level")
 
+                self._logger = await self.__get_logger(self.__queue_name, logging_level=self.__logging_level)
+            elif self._logger is None:
+                self._logger = await self.__get_logger(self.__queue_name, logging_level=logging.INFO)
             self._logger.info(f"Starting service with queue: {self.__queue_name}")
             await self.__set_queue()
             await self.__set_semaphore()
             self._logger.info("Setting Routes")
             await self.__set_routes()
-
+            if self.__logging_level is not None:
+                self.__middleware_manager.add_middleware(LoggerMiddleware(self._logger))
             self._logger.info("Configuring middleware chain")
             await self.__activate_middleware()
             self.__middleware_manager.add_middleware(self.__routing_middleware)
