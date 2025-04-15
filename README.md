@@ -1,12 +1,11 @@
 # `wasla` Package Documentation
 
 ## Overview
-A Python package for building event-driven consumers with RabbitMQ, featuring:
-- **Routing middleware** for message handling
-- **Concurrency control** with semaphores
-- **Automatic retries** with exponential backoff
-- **Structured logging** with color output
-- **Middleware pipeline** for extensibility
+Wasla was developed to facilitate the build of events based systems that uses RabbitMQ as the message broker,
+wasla is built on [aio_pika](https://github.com/mosquito/aio-pika) to represent the core of RabbitMQ connection,
+while wasla provides a mini framework for routing and middlewares.
+Using the right configuration and a well structured routing map, you can publish an event to many consumers
+with just one line of code.
 
 ## Installation
 ```bash
@@ -72,7 +71,7 @@ async def handle_payment(event: PaymentEvent):
     pass
 
 # Without validation (accepts any payload)
-@router.route("log.*")  # Wildcard matching
+@router.route("log")
 async def handle_logs(event):
     pass
 ```
@@ -109,10 +108,9 @@ builder.queue = queue  # Override auto-created queue
 ## Best Practices
 
 1. **Schema Validation**: Always define Pydantic models for important events
-2. **Idempotency**: Design handlers to safely process duplicate messages
-3. **Concurrency**: Set reasonable limits based on your workload
-4. **Monitoring**: Check DLQ regularly for failed messages
-5. **Logging**: Use the built-in structured logger or integrate with your existing system
+2. **Concurrency**: Set reasonable limits based on your workload
+3. **Monitoring**: Check DLQ regularly for failed messages
+4. **Logging**: Use the built-in structured logger or integrate with your existing system
 
 ## Troubleshooting
 
