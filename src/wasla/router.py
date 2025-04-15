@@ -62,8 +62,9 @@ class Router:
             callable: Decorator function for the handler
             
         Raises:
-            ValueError: If handler is not callable or routing key is not a string
-        """
+            ValueError: If handler is not callable, routing key is not a string,
+            or event schema is not a subclass of BaseModel
+            """
         def decorator(handler):
             if not callable(handler):
                 raise ValueError("Handler must be a callable")
