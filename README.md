@@ -4,7 +4,7 @@
 Wasla was developed to facilitate the build of events based systems that uses RabbitMQ as the message broker,
 wasla is built on [aio_pika](https://github.com/mosquito/aio-pika) to represent the core of RabbitMQ connection,
 while wasla provides a mini framework for routing and middlewares.
-Using the right configuration and a well structured routing map, you can publish an event to many consumers
+With the right configuration and a well structured routing map, you can publish an event to many consumers
 with just one line of code.
 
 ## Installation
@@ -33,7 +33,7 @@ async def handle_order_created(event: OrderCreatedEvent):
 
 # Configure the consumer
 builder = Builder(
-    routing_key="orders",  # Base routing key
+    routing_key="orders.#",  # Base routing key
     queue_name="order_processor",
     concurrency_limit=5    # Max parallel messages
 )
